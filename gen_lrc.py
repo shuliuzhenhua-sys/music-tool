@@ -164,7 +164,11 @@ def generate_lrc(audio_path, lyrics_path, out_path, ms_digits=3):
     for ln in lines:
         cl = _clean_line(ln)
         if cl:
-            clean_lines.append(cl)
+            # Split the cleaned line into sentences based on spaces
+            sentences = cl.split(' ')
+            for sentence in sentences:
+                if sentence:
+                    clean_lines.append(sentence)
     line_tokens = [tokenize(ln) for ln in clean_lines]
     ref_tokens = [t for ts in line_tokens for t in ts]
     mapping = align_tokens(ref_tokens, hyp_tokens)

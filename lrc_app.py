@@ -1,11 +1,23 @@
 import argparse
 import json
-import os
+
 import re
 import subprocess
 import imghdr
+from mutagen.id3 import ID3, APIC, TIT2, TPE1, TALB, error
+from mutagen.mp3 import MP3
+from mutagen.mp4 import MP4, MP4Cover
 
-def _parse_ts(s):
+def _parse_ts(s: str) -> int | None:
+    """
+    Parse a timestamp string like [00:00.00] into milliseconds.
+
+    Args:
+        s: The timestamp string.
+
+    Returns:
+        The timestamp in milliseconds, or None if parsing fails.
+    """
     m = re.match(r"\[(\d{1,2}):(\d{2})(?:\.(\d{1,3}))?\]", s)
     if not m:
         return None
@@ -22,7 +34,17 @@ def _parse_ts(s):
             frac = int(ms[:3])
     return mm * 60_000 + ss * 1000 + frac
 
-def _fmt_ts(ms, digits=2):
+def _fmt_ts(ms: int, digits: int = 2) -> str:
+    """
+    Format milliseconds into a timestamp string like [00:00.00].
+
+    Args:
+        ms: The timestamp in milliseconds.
+        digits: The number of digits for the fractional part (2 or 3).
+
+    Returns:
+        The formatted timestamp string.
+    """
     if ms < 0:
         ms = 0
     mm = ms // 60_000
@@ -39,24 +61,46 @@ def _fmt_ts(ms, digits=2):
             ss = 0
     return f"[{mm:02d}:{ss:02d}.{cs:02d}]"
 
-def read_lrc(path):
+def read_lrc(path: str) -> tuple[dict, list]:
+    """
+    Read a .lrc file and parse its content.
+
+    Args:
+        path: The path to the .lrc file.
+
+    Returns:
+        A tuple containing the headers (dict) and the lyric entries (list).
+    """
     headers = {}
     entries = []
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.rstrip("\n")
-            if re.match(r"^\[[a-zA-Z]+:.*\]$", line):
-                k = line[1:line.find(":")]
-                v = line[line.find(":")+1:-1]
-                headers[k] = v
-                continue
-            m = re.match(r"^(\[[0-9]{1,2}:[0-9]{2}(?:\.[0-9]{1,3})?\])(.+)$", line)
-            if m:
-                t = _parse_ts(m.group(1))
-                entries.append({"t": t, "text": m.group(2)})
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.rstrip("\n")
+                if re.match(r"^\[[a-zA-Z]+:.*\]$", line):
+                    k = line[1:line.find(":")]
+                    v = line[line.find(":")+1:-1]
+                    headers[k] = v
+                    continue
+                m = re.match(r"^(\[[0-9]{1,2}:[0-9]{2}(?:\.[0-9]{1,3})?\])(.+)$", line)
+                if m:
+                    t = _parse_ts(m.group(1))
+                    entries.append({"t": t, "text": m.group(2)})
+    except FileNotFoundError:
+        print(f"Error: File not found at {path}")
+        return None, None
     return headers, entries
 
-def write_lrc(path, headers, entries, digits=2):
+def write_lrc(path: str, headers: dict, entries: list, digits: int = 2) -> None:
+    """
+    Write headers and lyric entries to a .lrc file.
+
+    Args:
+        path: The path to the .lrc file.
+        headers: The headers (dict).
+        entries: The lyric entries (list).
+        digits: The number of digits for the fractional part (2 or 3).
+    """
     lines = []
     for k in ("ti","ar","al","by","offset","re","ve"):
         if k in headers:
@@ -66,7 +110,16 @@ def write_lrc(path, headers, entries, digits=2):
     with open(path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
 
-def ffprobe_info(audio_path):
+def ffprobe_info(audio_path: str) -> dict:
+    """
+    Get audio file information using ffprobe.
+
+    Args:
+        audio_path: The path to the audio file.
+
+    Returns:
+        A dict containing audio information like title, artist, album, and duration.
+    """
     try:
         p = subprocess.run(["ffprobe","-v","quiet","-print_format","json","-show_format","-show_streams",audio_path], capture_output=True, check=True)
         data = json.loads(p.stdout.decode())
@@ -78,11 +131,16 @@ def ffprobe_info(audio_path):
             "album": tags.get("album") or tags.get("ALBUM"),
             "duration": float(fmt.get("duration")) if fmt.get("duration") else None
         }
-    except Exception:
-        return {}
+    except (subprocess.CalledProcessError, FileNotFoundError, json.JSONDecodeError) as e:
+        print(f"Error processing {audio_path}: {e}")
 
-def cmd_info(args):
+def cmd_info(args: argparse.Namespace) -> None:
+    """
+    Show information about a .lrc file and its corresponding audio file.
+    """
     h, e = read_lrc(args.lrc)
+    if h is None:
+        return
     ai = ffprobe_info(args.audio) if args.audio else {}
     out = {
         "lrc_headers": h,
@@ -92,8 +150,13 @@ def cmd_info(args):
     }
     print(json.dumps(out, ensure_ascii=False, indent=2))
 
-def cmd_set(args):
+def cmd_set(args: argparse.Namespace) -> None:
+    """
+    Set headers in a .lrc file.
+    """
     h, e = read_lrc(args.lrc)
+    if h is None:
+        return
     if args.ti is not None:
         h["ti"] = args.ti
     if args.ar is not None:
@@ -105,8 +168,13 @@ def cmd_set(args):
     write_lrc(args.lrc, h, e, digits=2)
     print(args.lrc)
 
-def cmd_offset(args):
+def cmd_offset(args: argparse.Namespace) -> None:
+    """
+    Offset all timestamps in a .lrc file.
+    """
     h, e = read_lrc(args.lrc)
+    if h is None:
+        return
     off = int(args.ms)
     h["offset"] = str(off)
     e2 = []
@@ -115,8 +183,13 @@ def cmd_offset(args):
     write_lrc(args.lrc, h, e2, digits=2)
     print(args.lrc)
 
-def cmd_sync(args):
+def cmd_sync(args: argparse.Namespace) -> None:
+    """
+    Sync headers of a .lrc file with audio file tags.
+    """
     h, e = read_lrc(args.lrc)
+    if h is None:
+        return
     ai = ffprobe_info(args.audio)
     if ai.get("title"):
         h["ti"] = ai["title"]
@@ -127,22 +200,28 @@ def cmd_sync(args):
     write_lrc(args.lrc, h, e, digits=2)
     print(args.lrc)
 
-def cmd_export(args):
+def cmd_export(args: argparse.Namespace) -> None:
+    """
+    Export a .lrc file to a .json file.
+    """
     h, e = read_lrc(args.lrc)
+    if h is None:
+        return
     obj = {"headers": h, "lines": [{"time_ms": x["t"], "text": x["text"]} for x in e]}
     with open(args.out, "w", encoding="utf-8") as f:
         json.dump(obj, f, ensure_ascii=False, indent=2)
     print(args.out)
 
-def set_cover(audio_path, cover_path):
-    ext = os.path.splitext(cover_path)[1].lower()
+def set_cover(audio_path: str, cover_path: str) -> bool:
+    """
+    Set the cover image for an audio file.
+    """
+
     with open(cover_path, "rb") as f:
         data = f.read()
     kind = imghdr.what(None, data)
     mime = "image/jpeg" if kind in ("jpeg","jpg") else ("image/png" if kind == "png" else "image/jpeg")
     if audio_path.lower().endswith(".mp3"):
-        from mutagen.id3 import ID3, APIC, error
-        from mutagen.mp3 import MP3
         audio = MP3(audio_path, ID3=ID3)
         try:
             audio.add_tags()
@@ -152,7 +231,6 @@ def set_cover(audio_path, cover_path):
         audio.save()
         return True
     if audio_path.lower().endswith(".m4a") or audio_path.lower().endswith(".mp4"):
-        from mutagen.mp4 import MP4, MP4Cover
         fmt = MP4Cover.FORMAT_JPEG if mime == "image/jpeg" else MP4Cover.FORMAT_PNG
         mp4 = MP4(audio_path)
         mp4["covr"] = [MP4Cover(data, fmt)]
@@ -160,14 +238,18 @@ def set_cover(audio_path, cover_path):
         return True
     return False
 
-def cmd_cover(args):
+def cmd_cover(args: argparse.Namespace) -> None:
+    """
+    Set the cover image for an audio file.
+    """
     ok = set_cover(args.audio, args.cover)
     print("OK" if ok else "UNSUPPORTED")
 
-def set_audio_tags(audio_path, ti=None, ar=None, al=None):
+def set_audio_tags(audio_path: str, ti: str | None = None, ar: str | None = None, al: str | None = None) -> bool:
+    """
+    Set audio tags for an audio file.
+    """
     if audio_path.lower().endswith(".mp3"):
-        from mutagen.id3 import ID3, TIT2, TPE1, TALB, error
-        from mutagen.mp3 import MP3
         audio = MP3(audio_path, ID3=ID3)
         try:
             audio.add_tags()
@@ -182,7 +264,6 @@ def set_audio_tags(audio_path, ti=None, ar=None, al=None):
         audio.save()
         return True
     if audio_path.lower().endswith(".m4a") or audio_path.lower().endswith(".mp4"):
-        from mutagen.mp4 import MP4
         mp4 = MP4(audio_path)
         if ti is not None:
             mp4["\xa9nam"] = [ti]
@@ -194,11 +275,17 @@ def set_audio_tags(audio_path, ti=None, ar=None, al=None):
         return True
     return False
 
-def cmd_atag(args):
+def cmd_atag(args: argparse.Namespace) -> None:
+    """
+    Set audio tags for an audio file.
+    """
     ok = set_audio_tags(args.audio, args.ti, args.ar, args.al)
     print("OK" if ok else "UNSUPPORTED")
 
-def main():
+def main() -> None:
+    """
+    Main function to parse command line arguments and execute commands.
+    """
     p = argparse.ArgumentParser()
     sub = p.add_subparsers(dest="cmd")
     sp = sub.add_parser("info")
